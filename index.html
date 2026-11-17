@@ -845,14 +845,21 @@ async function runAi(fresh){
   const tok=S.ocrTok, st=$('#ocrStat'), b=$('#btnOcr'); b.disabled=true;
   st.textContent='AI 判斷中…';
   try{
-    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
-      headers:{'content-type':'application/json','x-api-key':getAiKey(),'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-haiku-5-5',max_tokens:300,messages:[{role:'user',content:[
-        {type:'image',source:{type:'base64',media_type:'image/jpeg',data:src.split(',')[1]}},{type:'text',text:AI_PROMPT}]}]})});
-    if(r.status===401) throw new Error('key');
+    const key=getAiKey(), b64=src.split(',')[1], claude=key.startsWith('sk-ant-');
+    const r=claude
+      ?await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+        headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body:JSON.stringify({model:'claude-haiku-5-5',max_tokens:300,messages:[{role:'user',content:[
+          {type:'image',source:{type:'base64',media_type:'image/jpeg',data:b64}},{type:'text',text:AI_PROMPT}]}]})})
+      :await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent',{method:'POST',
+        headers:{'content-type':'application/json','x-goog-api-key':key},
+        body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:'image/jpeg',data:b64}},{text:AI_PROMPT}]}],
+          generationConfig:{responseMimeType:'application/json',maxOutputTokens:1024}})});
+    if([400,401,403].includes(r.status)) throw new Error('key');
     if(!r.ok) throw new Error('http');
     const d=await r.json(); if(tok!==S.ocrTok) return;
-    const t=(d.content||[]).map(c=>c.text||'').join('');
+    const t=claude?(d.content||[]).map(c=>c.text||'').join('')
+      :((d.candidates?.[0]?.content?.parts)||[]).map(c=>c.text||'').join('');
     applyAi(JSON.parse((t.match(/\{[\s\S]*\}/)||['{}'])[0]),fresh);
   }catch(err){
     if(tok!==S.ocrTok) return;
@@ -880,7 +887,7 @@ function applyAi(j,fresh){
 }
 $('#btnAiKey').onclick=e=>{
   e.preventDefault();
-  const k=prompt('貼上你的 Anthropic API 金鑰（sk-ant-…），只存在這支手機的瀏覽器。\n留空並確定＝關閉 AI，改回內建辨識。',getAiKey());
+  const k=prompt('貼上 Gemini 金鑰（AIza…，免費）或 Anthropic 金鑰（sk-ant-…），只存在這支手機的瀏覽器。\n留空並確定＝關閉 AI，改回內建辨識。',getAiKey());
   if(k===null) return;
   try{k.trim()?localStorage.setItem(AIKEY,k.trim()):localStorage.removeItem(AIKEY)}catch(err){}
   toast(k.trim()?'AI 自動判斷已開啟':'已關閉 AI，使用內建辨識');

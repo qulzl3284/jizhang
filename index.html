@@ -159,7 +159,6 @@ button{cursor:pointer}
 
 .field{margin-bottom:14px}
 .field>label,.field>.lab{display:block;font-size:13px;color:var(--muted);margin-bottom:4px}
-.inp[type=date]{-webkit-appearance:none;appearance:none;display:block;min-width:0;max-width:100%;text-align:left;min-height:42px}
 .inp{width:100%;border:1px solid var(--rule);border-radius:8px;padding:9px 11px;background:#fff}
 .inp:focus{border-color:var(--ink);outline:none;box-shadow:0 0 0 3px rgba(28,37,65,.1)}
 .amount{display:flex;align-items:baseline;border-bottom:2px solid var(--ink);padding:2px 0}
@@ -329,7 +328,6 @@ mark{background:var(--marker);color:inherit;padding:0 1px;border-radius:2px}
         <div class="side">
           <button type="button" class="btn" id="btnOcr">重新辨識</button>
           <span class="ocrstat" id="ocrStat" aria-live="polite">選好照片會自動讀取金額</span>
-          <button type="button" class="btn" id="btnLens">以圖搜尋查價</button>
           <button type="button" class="btn danger" id="btnRmImg">移除圖片</button>
         </div>
       </div>
@@ -543,29 +541,16 @@ function toast(msg,ms=2600){const t=$('#toast');t.textContent=msg;t.classList.ad
 
 /* ========== 自動分類 ========== */
 const norm=s=>String(s||'').trim().toLowerCase().replace(/\s+/g,'');
-const isAscii=k=>/^[\x00-\x7f]+$/.test(k);
-const reCache={};
-function kwHit(raw,t,kw,ocr){
-  if(isAscii(kw)){
-    if(ocr&&kw.replace(/\s/g,'').length<4) return false;
-    const re=reCache[kw]||(reCache[kw]=new RegExp('(^|[^a-z0-9])'+kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/ /g,'\\s*')+'($|[^a-z0-9])'));
-    return re.test(raw);
-  }
-  const k=norm(kw); if(!k) return false;
-  if(ocr&&k.length<2) return false;
-  return t.includes(k);
-}
-function classify(text,ocr){
+function classify(text){
   const t=norm(text); if(!t) return null;
-  const raw=String(text).toLowerCase();
   if(learn[t]) return {...learn[t],src:'learn',kw:text.trim()};
   let best=null;
   for(const k in learn){ if(k.length>=2 && t.includes(k)){const sc=k.length+10; if(!best||sc>best.sc) best={...learn[k],sc,src:'learn',kw:k}} }
   if(best) return best;
   for(const type of ['expense','income']) for(const cat in CATS[type]) for(const sub in CATS[type][cat].subs)
     for(const kw of CATS[type][cat].subs[sub]){
-      if(kwHit(raw,t,kw,ocr)){
-        const sc=norm(kw).length+(type==='income'?0.1:0);
+      const k=norm(kw); if(k && t.includes(k)){
+        const sc=k.length+(type==='income'?0.1:0);
         if(!best||sc>best.sc) best={type,cat,sub,sc,kw,src:'dict'};
       }
     }
@@ -714,26 +699,13 @@ function resize(img,max,q){
   const c=document.createElement('canvas');c.width=Math.round(img.width*s);c.height=Math.round(img.height*s);
   c.getContext('2d').drawImage(img,0,0,c.width,c.height);return c.toDataURL('image/jpeg',q);
 }
-function ocrPrep(img){
-  const s=Math.min(1,2000/Math.max(img.width,img.height));
-  const c=document.createElement('canvas');c.width=Math.round(img.width*s);c.height=Math.round(img.height*s);
-  const x=c.getContext('2d');x.drawImage(img,0,0,c.width,c.height);
-  try{
-    const d=x.getImageData(0,0,c.width,c.height),a=d.data;let lo=255,hi=0;const g=new Uint8ClampedArray(a.length/4);
-    for(let i=0,j=0;i<a.length;i+=4,j++){const v=a[i]*.299+a[i+1]*.587+a[i+2]*.114;g[j]=v;if(v<lo)lo=v;if(v>hi)hi=v}
-    const r=Math.max(1,hi-lo);
-    for(let i=0,j=0;i<a.length;i+=4,j++){const v=(g[j]-lo)*255/r;a[i]=a[i+1]=a[i+2]=v}
-    x.putImageData(d,0,0);
-  }catch(e){}
-  return c.toDataURL('image/jpeg',.92);
-}
 function readImg(file){
   const fr=new FileReader();
-  fr.onload=()=>{const img=new Image();img.onload=()=>{showImg(resize(img,480,.72),ocrPrep(img),resize(img,1600,.9));runOcr(true)};img.src=fr.result};
+  fr.onload=()=>{const img=new Image();img.onload=()=>{showImg(resize(img,480,.72),resize(img,1600,.9));runOcr(true)};img.src=fr.result};
   fr.readAsDataURL(file);
 }
-function showImg(thumb,full,orig){
-  S.img=thumb;S.ocrSrc=full;S.origSrc=orig||full;S.ocrTok=(S.ocrTok||0)+1;$('#prevImg').src=thumb;drop.classList.add('has');
+function showImg(thumb,full){
+  S.img=thumb;S.ocrSrc=full;S.ocrTok=(S.ocrTok||0)+1;$('#prevImg').src=thumb;drop.classList.add('has');
   $('#ocrStat').textContent='可重新辨識收據上的金額';$('#cands').innerHTML='';updateLinks();
 }
 function clearImg(){S.img=null;S.ocrSrc=null;S.ocrTok=(S.ocrTok||0)+1;drop.classList.remove('has');$('#cands').innerHTML='';updateLinks()}
@@ -765,15 +737,13 @@ async function runOcr(fresh){
     const w=await getWorker();
     const res=await w.recognize(S.ocrSrc);
     if(tok!==S.ocrTok) return;
-    const L=(res.data.lines||[]).filter(l=>l.confidence>=55).map(l=>l.text);
-    parseOcr(L.length||!(res.data.lines||[]).length?(L.length?L.join('\n'):res.data.text||''):'',fresh);
+    parseOcr(res.data.text||'',fresh);
   }catch(err){
     if(tok===S.ocrTok) st.textContent=err.message==='load'?'連不上網路，無法自動辨識，請手動輸入金額':'辨識失敗，換張清楚一點的照片試試';
     ocrWorker=null;
   }finally{b.disabled=false}
 }
 $('#btnOcr').onclick=e=>{e.preventDefault();runOcr(true)};
-$('#btnLens').onclick=e=>{e.preventDefault();document.querySelector('#links [data-img=google]').click()};
 function pickAmount(lines){
   const clean=l=>l.replace(/\d{1,2}:\d{2}(:\d{2})?/g,' ').replace(/\d{2,4}\s*[\/\-.年]\s*\d{1,2}\s*[\/\-.月]\s*\d{1,2}/g,' ')
     .replace(/[OoＯ](?=\d)|(?<=\d)[OoＯ]/g,'0').replace(/(\d)\s*[,，]\s*(\d{3})(?!\d)/g,'$1$2');
@@ -792,7 +762,7 @@ function pickAmount(lines){
   });
   const money=lines.flatMap(l=>[...clean(l).matchAll(/(?:\$|NT\$?|元)\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*元/gi)].map(m=>+(m[1]||m[2]))).filter(n=>n>0&&n<1e6);
   const all=lines.filter(l=>!skip.test(l)).flatMap(numsOf).filter(n=>!(n>=1900&&n<=2100&&n%1===0)&&n<100000);
-  let amt=best?best.v:money.length?Math.max(...money):null;
+  let amt=best?best.v:money.length?Math.max(...money):all.length?Math.max(...all):null;
   [...money,...all.sort((a,b)=>b-a).slice(0,4)].forEach(n=>cand.push(n));
   return {amt,cand:[...new Set(cand)].slice(0,6)};
 }
@@ -801,12 +771,6 @@ function parseOcr(raw,fresh){
   const st=$('#ocrStat');
   if(!lines.length){st.textContent='沒有讀到文字，請換張清楚的照片或手動輸入';return}
   const flat=lines.join(' ');
-  const receipt=/(發票|收據|明細|總計|合計|小計|金額|應付|實付|交易|消費|nt\$|\$\s*\d|\d\s*元|找零|line\s*pay|授權)/i.test(flat);
-  if(!receipt){
-    $('#cands').innerHTML='';
-    st.innerHTML='這張看起來是商品照片，上面沒有價格。可以按「以圖搜尋查價」上網查，或直接輸入金額';
-    return;
-  }
   // 日期
   const dms=[...flat.matchAll(/(\d{2,4})\s*[\/\-.年]\s*(\d{1,2})\s*[\/\-.月]\s*(\d{1,2})(?!\s*月)(?!\d)/g)];
   const dm=dms.find(m=>m[1].length===4)||dms[0];
@@ -826,19 +790,15 @@ function parseOcr(raw,fresh){
   updateBankRows();
   // 品名候選
   const skip=/(發票|統一編號|統編|電話|地址|tel|序號|機號|隨機碼|載具|日期|時間|收銀|謝謝|www|http|總計|合計|小計|找零|現金|銀行|bank|付款完成|授權|簽名|賣方|買方|金額|應付|實付)/i;
-  const goodLine=l=>{const vis=l.replace(/[\s\d$.,:：*xX×@＄元-]/g,''),cjk=(vis.match(/[一-鿿]/g)||[]).length;return cjk>=2&&cjk/vis.length>=.6&&vis.length<=24};
-  const names=[...new Set(lines.filter(l=>goodLine(l)&&!skip.test(l))
-    .map(l=>l.replace(/[^一-鿿A-Za-z ]+/g,' ').split(/\s+/).filter(w=>/[一-鿿]/.test(w)||w.length>=3).join(' ').trim())
-    .filter(l=>(l.match(/[一-鿿]/g)||[]).length>=2))].slice(0,6);
-  const pick=names.find(n=>classify(n,true)?.src==='dict')||names[0];
+  const names=lines.filter(l=>/[一-鿿]{2,}/.test(l)&&!skip.test(l)).map(l=>l.replace(/[\d$.,:：*xX]+/g,' ').replace(/\s+/g,' ').trim()).filter(l=>l.length>=2).slice(0,8);
+  const pick=names.find(n=>classify(n)?.src==='dict')||names[0];
   if(pick&&!$('#item').value){$('#item').value=pick}
   // 用全文輔助分類
-  if(!S.catManual){const r=classify(flat,true);if(r&&!classify($('#item').value)){setType(r.type);setCat(r.cat,r.sub);$('#autoNote').innerHTML=`從圖片中的「${esc(r.kw)}」判斷為 <b>${esc(r.cat)} › ${esc(r.sub)}</b>`}else autoClassify()}
+  if(!S.catManual){const r=classify(flat);if(r&&!classify($('#item').value)){setType(r.type);setCat(r.cat,r.sub);$('#autoNote').innerHTML=`從圖片中的「${esc(r.kw)}」判斷為 <b>${esc(r.cat)} › ${esc(r.sub)}</b>`}else autoClassify()}
   updateLinks();
   $('#cands').innerHTML=cand.map(n=>`<button type="button" class="cand amt" data-a="${n}" title="帶入金額">$${n.toLocaleString('zh-TW')}</button>`).join('')
     +names.map(n=>`<button type="button" class="cand" data-n="${esc(n)}" title="帶入品項">${esc(n)}</button>`).join('');
-  st.textContent=(amt!==null?`已帶入金額 $${amt.toLocaleString('zh-TW')}`:'沒找到總金額，請點下方數字或手動輸入')
-    +(pick?'':'；品項沒讀清楚，請自己輸入或點下方文字');
+  st.textContent=amt!==null?`已帶入金額 $${amt.toLocaleString('zh-TW')}，不對的話點下方數字替換`:'找不到金額，請點下方數字或手動輸入';
 }
 $('#cands').onclick=e=>{
   const b=e.target.closest('.cand');if(!b)return;
@@ -854,7 +814,7 @@ function updateLinks(){
 }
 async function copyImage(){
   try{
-    const img=new Image();img.src=S.origSrc||S.img;await img.decode();
+    const img=new Image();img.src=S.ocrSrc||S.img;await img.decode();
     const c=document.createElement('canvas');c.width=img.width;c.height=img.height;c.getContext('2d').drawImage(img,0,0);
     const blob=await new Promise(r=>c.toBlob(r,'image/png'));
     await navigator.clipboard.write([new ClipboardItem({'image/png':blob})]);return true;

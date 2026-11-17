@@ -356,6 +356,7 @@ mark{background:var(--marker);color:inherit;padding:0 1px;border-radius:2px}
     <div class="gbar" id="gbar">
       <button type="button" class="btn g" id="btnGoogle">用 Google AI 查</button>
       <button type="button" class="btn" id="btnPaste">貼上 Google 結果</button>
+      <button type="button" class="btn" id="btnAiKey">AI 設定</button>
     </div>
     <div class="gres" id="gres" hidden></div>
     <div class="cands" id="cands" aria-label="辨識結果，點選即可帶入"></div>
@@ -788,11 +789,11 @@ function readImg(file){
   fr.onload=()=>{const img=new Image();img.onload=()=>{S.rawImg=img;showImg(resize(img,480,.72),ocrPrep(img),resize(img,1600,.9));
     try{S.imgHash=dhash(img)}catch(e){S.imgHash=null}
     const m=S.imgHash&&matchPhoto(S.imgHash);
-    if(m) applyMemory(m); else runOcr(true);};img.src=fr.result};
+    if(m) applyMemory(m); else recognize(true);};img.src=fr.result};
   fr.readAsDataURL(file);
 }
 function showImg(thumb,full,orig){
-  S.img=thumb;S.ocrSrc=full;S.origSrc=orig||full;$('#gres').hidden=true;S.ocrTok=(S.ocrTok||0)+1;$('#prevImg').src=thumb;drop.classList.add('has');
+  S.img=thumb;S.ocrSrc=full;S.origSrc=orig||full;S.aiSrc=orig||full;$('#gres').hidden=true;S.ocrTok=(S.ocrTok||0)+1;$('#prevImg').src=thumb;drop.classList.add('has');
   $('#ocrStat').textContent='可重新辨識收據上的金額';$('#cands').innerHTML='';updateLinks();
 }
 function clearImg(){S.rawImg=null;S.imgHash=null;$('#gres').hidden=true;S.img=null;S.ocrSrc=null;S.ocrTok=(S.ocrTok||0)+1;drop.classList.remove('has');$('#cands').innerHTML='';updateLinks()}
@@ -831,7 +832,60 @@ async function runOcr(fresh){
     ocrWorker=null;
   }finally{b.disabled=false}
 }
-$('#btnOcr').onclick=e=>{e.preventDefault();runOcr(true)};
+
+/* ========== AI 自動判斷（Claude 視覺）：有設定金鑰就用 AI，失敗自動退回內建 OCR ========== */
+const AIKEY='suishou-aikey';
+const getAiKey=()=>{try{return localStorage.getItem(AIKEY)||''}catch(e){return ''}};
+const AI_PROMPT=`你是台灣記帳 App 的圖片判讀助手。看這張照片（收據、發票、價格標籤、或商品本身），只回傳一個 JSON，不要任何其他文字：
+{"item":"簡短品名，繁體中文 2-12 字","amount":數字或null,"date":"YYYY-MM-DD"或null,"pay":"現金"|"信用卡"|"行動支付"|"轉帳"|null,"wallet":"LINE Pay"|"Apple Pay"|"Google Pay"|"街口"|"全支付"|null,"bank":"中信"|"國泰"|null,"estimated":true|false}
+規則：收據/發票填實付總額；價格標籤填標示售價；只有商品沒有價格時，辨識品名並以台灣一般市價估算，estimated 設 true。民國年請轉成西元。看不出來的欄位填 null，不要亂猜付款方式。`;
+function recognize(fresh){return getAiKey()?runAi(fresh):runOcr(fresh)}
+async function runAi(fresh){
+  const src=S.aiSrc||S.origSrc; if(!src) return;
+  const tok=S.ocrTok, st=$('#ocrStat'), b=$('#btnOcr'); b.disabled=true;
+  st.textContent='AI 判斷中…';
+  try{
+    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+      headers:{'content-type':'application/json','x-api-key':getAiKey(),'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({model:'claude-haiku-5-5',max_tokens:300,messages:[{role:'user',content:[
+        {type:'image',source:{type:'base64',media_type:'image/jpeg',data:src.split(',')[1]}},{type:'text',text:AI_PROMPT}]}]})});
+    if(r.status===401) throw new Error('key');
+    if(!r.ok) throw new Error('http');
+    const d=await r.json(); if(tok!==S.ocrTok) return;
+    const t=(d.content||[]).map(c=>c.text||'').join('');
+    applyAi(JSON.parse((t.match(/\{[\s\S]*\}/)||['{}'])[0]),fresh);
+  }catch(err){
+    if(tok!==S.ocrTok) return;
+    toast(err.message==='key'?'AI 金鑰無效，改用內建辨識':'AI 連線失敗，改用內建辨識',3500);
+    b.disabled=false; await runOcr(fresh); return;
+  }finally{b.disabled=false}
+}
+function applyAi(j,fresh){
+  const amt=+j.amount, item=String(j.item||'').trim().slice(0,40);
+  if(item&&(fresh||!$('#item').value)) $('#item').value=item;
+  if(amt>0&&amt<1e6&&(fresh||!$('#amount').value)){
+    $('#amount').value=String(amt);const a=$('.amount');a.classList.remove('flash');void a.offsetWidth;a.classList.add('flash')}
+  if(/^\d{4}-\d{2}-\d{2}$/.test(j.date||'')&&j.date<=today()) $('#date').value=j.date;
+  if(['現金','信用卡','行動支付','轉帳'].includes(j.pay)){setRadio('pay',j.pay);if(j.pay==='行動支付'&&j.wallet)setRadio('wallet',j.wallet)}
+  if(j.bank==='中信'||j.bank==='國泰') setRadio('bank',j.bank);
+  updateBankRows();
+  S.catManual=false;S.typeManual=false;autoClassify();updateLinks();
+  $('#cands').innerHTML='';
+  const g=$('#gres');
+  if(item||amt>0){
+    g.innerHTML=`AI 判斷：<b>${esc(item||'（沒有品名）')}</b>${amt>0?`　$${amt.toLocaleString('zh-TW')}`:'　（沒看到價格）'}`
+      +(j.estimated?'<div style="color:var(--muted);margin-top:4px">價格是 AI 依市價估算，請確認</div>':'');
+    g.hidden=false;$('#ocrStat').textContent='AI 已自動帶入，不對直接改';
+  }else{g.hidden=true;$('#ocrStat').textContent='AI 看不出來，請手動輸入或框選標籤再試'}
+}
+$('#btnAiKey').onclick=e=>{
+  e.preventDefault();
+  const k=prompt('貼上你的 Anthropic API 金鑰（sk-ant-…），只存在這支手機的瀏覽器。\n留空並確定＝關閉 AI，改回內建辨識。',getAiKey());
+  if(k===null) return;
+  try{k.trim()?localStorage.setItem(AIKEY,k.trim()):localStorage.removeItem(AIKEY)}catch(err){}
+  toast(k.trim()?'AI 自動判斷已開啟':'已關閉 AI，使用內建辨識');
+};
+$('#btnOcr').onclick=e=>{e.preventDefault();recognize(true)};
 function fillFrom(item,amount,note){
   if(item){$('#item').value=item;}
   if(amount>0){$('#amount').value=String(amount);const a=$('.amount');a.classList.remove('flash');void a.offsetWidth;a.classList.add('flash')}
@@ -843,7 +897,7 @@ function applyMemory(m){
   const g=$('#gres');
   g.innerHTML=`認出這是你記過的 <b>${esc(m.item)}</b>，已帶入 $${Number(m.amount).toLocaleString('zh-TW')}<div class="acts"><button type="button" class="btn" id="notThis">不是這個</button></div>`;
   g.hidden=false;$('#ocrStat').textContent='從你的紀錄自動帶入';
-  $('#notThis').onclick=()=>{$('#item').value='';$('#amount').value='';g.hidden=true;S.catManual=false;autoClassify();runOcr(true)};
+  $('#notThis').onclick=()=>{$('#item').value='';$('#amount').value='';g.hidden=true;S.catManual=false;autoClassify();recognize(true)};
 }
 /* Google AI 查詢 */
 function copyImageSync(){
@@ -923,9 +977,9 @@ $('#cropOk').onclick=()=>{
   const c=document.createElement('canvas');c.width=Math.round(sw*scale);c.height=Math.round(sh*scale);
   const x=c.getContext('2d');x.imageSmoothingQuality='high';x.drawImage(cropImg,sx,sy,sw,sh,0,0,c.width,c.height);
   closeCrop();
-  S.ocrSrc=ocrPrep(c);S.ocrTok=(S.ocrTok||0)+1;
+  S.ocrSrc=ocrPrep(c);S.aiSrc=c.toDataURL('image/jpeg',.9);S.ocrTok=(S.ocrTok||0)+1;
   $('#item').value='';$('#amount').value='';$('#gres').hidden=true;S.catManual=false;
-  runOcr(true);
+  recognize(true);
 };
 $('#pasteCancel').onclick=()=>$('#pasteDlg').close();
 $('#pasteOk').onclick=()=>{const t=$('#pasteTxt').value;$('#pasteDlg').close();applyPasted(t)};
